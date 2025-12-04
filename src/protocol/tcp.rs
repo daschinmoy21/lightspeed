@@ -1,5 +1,6 @@
 use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -109,6 +110,25 @@ impl TcpProtocol {
                 && expected_chunks.load(Ordering::SeqCst) > 0
             {
                 println!("[TCP] All chunks received");
+
+                // Verify file integrity
+                match std::fs::File::open(&output_file) {
+                    Ok(mut file) => {
+                        let mut hasher = Sha256::new();
+                        if std::io::copy(&mut file, &mut hasher).is_ok() {
+                            let received_hash = format!("{:x}", hasher.finalize());
+                            if received_hash == meta.hash {
+                                println!("[TCP] File integrity verified successfully");
+                            } else {
+                                eprintln!("[TCP] Hash mismatch! Expected {}, got {}", meta.hash, received_hash);
+                            }
+                        } else {
+                            eprintln!("[TCP] Failed to compute hash of received file");
+                        }
+                    }
+                    Err(e) => eprintln!("[TCP] Failed to open received file for verification: {}", e),
+                }
+
                 break;
             }
         }

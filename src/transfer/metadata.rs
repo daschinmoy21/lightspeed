@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 
 pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024; //4 mb chunks
@@ -9,6 +10,7 @@ pub struct FileMetadata {
     pub filename: String,
     pub size: u64,
     pub chunk_count: u64,
+    pub hash: String,
 }
 
 impl FileMetadata {
@@ -17,10 +19,17 @@ impl FileMetadata {
         let size = meta.len();
         let chunk_count = (size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
+        // Compute SHA256 hash
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut file, &mut hasher)?;
+        let hash = format!("{:x}", hasher.finalize());
+
         Ok(Self {
             filename: path.into(),
             size,
             chunk_count,
+            hash,
         })
     }
 

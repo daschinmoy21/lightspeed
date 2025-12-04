@@ -122,24 +122,29 @@ impl TcpSender {
                     let file_fd = file.as_raw_fd();
                     let sock_fd = conn.as_raw_fd();
                     let mut offset = start as i64;
-                    let sent = match tokio::task::spawn_blocking(move || {
-                        nix::sys::sendfile::sendfile(
-                            unsafe { fd::BorrowedFd::borrow_raw(sock_fd) },
-                            unsafe { fd::BorrowedFd::borrow_raw(file_fd) },
-                            Some(&mut offset),
-                            chunk_len,
-                        )
-                    }).await {
-                        Ok(Ok(s)) if s == chunk_len => s,
-                        Ok(Ok(s)) => {
-                            eprintln!("[TCP] Sendfile sent {} instead of {} for chunk {}", s, chunk_len, id);
-                            return;
+                    let mut remaining = chunk_len;
+                    while remaining > 0 {
+                        let to_send = remaining.min(0x7ffff000); // large chunk
+                        match tokio::task::spawn_blocking({
+                            let sock_fd = unsafe { fd::BorrowedFd::borrow_raw(sock_fd) };
+                            let file_fd = unsafe { fd::BorrowedFd::borrow_raw(file_fd) };
+                            move || {
+                                nix::sys::sendfile::sendfile(sock_fd, file_fd, Some(&mut offset), to_send)
+                            }
+                        }).await {
+                            Ok(Ok(sent)) if sent > 0 => {
+                                remaining -= sent;
+                            }
+                            Ok(Ok(0)) => {
+                                eprintln!("[TCP] Sendfile sent 0 for chunk {}", id);
+                                return;
+                            }
+                            _ => {
+                                eprintln!("[TCP] Sendfile failed for chunk {}", id);
+                                return;
+                            }
                         }
-                        _ => {
-                            eprintln!("[TCP] Sendfile failed for chunk {}", id);
-                            return;
-                        }
-                    };
+                    }
 
                     // Read ack
                     let mut ack = [0u8; 1];
