@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 
-pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024; //4 mb chunks
+pub const CHUNK_SIZE: u64 = 1 * 1024 * 1024; //4 mb chunks
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileMetadata {

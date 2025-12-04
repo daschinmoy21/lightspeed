@@ -11,7 +11,7 @@ use tokio::{
     net::TcpStream,
 };
 
-const WORKERS: usize = 6;
+const WORKERS: usize = 7;
 
 pub struct TcpSender {
     pub addr: String,
@@ -91,7 +91,9 @@ impl TcpSender {
                 while let Ok(id) = rx.recv().await {
                     // Lazy connection: connect only on first chunk
                     if conn.is_none() {
-                        conn = match timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+                        conn = match timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+                            .await
+                        {
                             Ok(Ok(c)) => {
                                 println!("[TCP] Worker connected to {}", addr);
                                 Some(c)
@@ -109,13 +111,23 @@ impl TcpSender {
                     let chunk = &mmap_ref[start as usize..end as usize];
 
                     // Send chunk header
-                    if conn.write_all(&(id as u32).to_le_bytes()).await.is_err() { return; }
-                    if conn.write_all(&(chunk.len() as u32).to_le_bytes()).await.is_err() { return; }
+                    if conn.write_all(&(id as u32).to_le_bytes()).await.is_err() {
+                        return;
+                    }
+                    if conn
+                        .write_all(&(chunk.len() as u32).to_le_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
 
                     println!("[TCP] Sending chunk {} size {}", id, chunk.len());
 
                     // Send chunk data
-                    if conn.write_all(chunk).await.is_err() { return; }
+                    if conn.write_all(chunk).await.is_err() {
+                        return;
+                    }
 
                     // Read ack
                     let mut ack = [0u8; 1];
