@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
 use anyhow::Result;
 use async_channel;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use std::os::fd::{self, AsRawFd};
 use tokio::time::timeout;
 use tokio::{
@@ -126,10 +127,15 @@ impl TcpSender {
                     while remaining > 0 {
                         let to_send = remaining.min(0x7ffff000); // large chunk
                         match tokio::task::spawn_blocking({
-                            let sock_fd = unsafe { fd::BorrowedFd::borrow_raw(sock_fd) };
-                            let file_fd = unsafe { fd::BorrowedFd::borrow_raw(file_fd) };
+                            let raw_sock_fd = sock_fd;
+                            let raw_file_fd = file_fd;
                             move || {
-                                nix::sys::sendfile::sendfile(sock_fd, file_fd, Some(&mut offset), to_send)
+                                // Set socket to blocking mode for sendfile
+                                let flags = fcntl(raw_sock_fd, FcntlArg::F_GETFL)?;
+                                fcntl(raw_sock_fd, FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) & !OFlag::O_NONBLOCK))?;
+                                let sock_borrowed = unsafe { fd::BorrowedFd::borrow_raw(raw_sock_fd) };
+                                let file_borrowed = unsafe { fd::BorrowedFd::borrow_raw(raw_file_fd) };
+                                nix::sys::sendfile::sendfile(sock_borrowed, file_borrowed, Some(&mut offset), to_send)
                             }
                         }).await {
                             Ok(Ok(sent)) if sent > 0 => {
