@@ -138,15 +138,20 @@ impl TcpSender {
                                 nix::sys::sendfile::sendfile(sock_borrowed, file_borrowed, Some(&mut offset), to_send)
                             }
                         }).await {
-                            Ok(Ok(sent)) if sent > 0 => {
-                                remaining -= sent;
+                            Ok(Ok(sent)) => {
+                                if sent > 0 {
+                                    remaining -= sent;
+                                } else {
+                                    eprintln!("[TCP] Sendfile sent 0 for chunk {}", id);
+                                    return;
+                                }
                             }
-                            Ok(Ok(0)) => {
-                                eprintln!("[TCP] Sendfile sent 0 for chunk {}", id);
+                            Ok(Err(e)) => {
+                                eprintln!("[TCP] Sendfile error for chunk {}: {:?}", id, e);
                                 return;
                             }
-                            _ => {
-                                eprintln!("[TCP] Sendfile failed for chunk {}", id);
+                            Err(e) => {
+                                eprintln!("[TCP] Spawn blocking error for chunk {}: {:?}", id, e);
                                 return;
                             }
                         }
