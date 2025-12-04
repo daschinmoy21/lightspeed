@@ -85,6 +85,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Receive { protocol } => match protocol {
             Protocol::Tcp => {
+                // Announce presence
+                tokio::spawn(async {
+                    let _ = discovery::start_broadcast(9001, 9001).await;
+                });
+
                 let server = protocol::tcp::TcpProtocol::new(9001);
                 server.start_server().await
             }
