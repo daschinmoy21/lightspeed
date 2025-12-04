@@ -1,6 +1,5 @@
 use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
 use anyhow::Result;
-use std::io::SeekFrom;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -8,8 +7,8 @@ use std::sync::{
 };
 use tokio::sync::Mutex;
 use tokio::{
-    fs::{File, OpenOptions},
-    io::{copy, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    fs::OpenOptions,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::TcpListener,
 };
 
@@ -94,7 +93,9 @@ impl TcpProtocol {
                     eprintln!("[TCP] Error writing chunk {chunk_id}: {e:?}");
                     return;
                 }
-                socket.write_all(&[1]).await?; //send ack after writing
+                if let Err(e) = socket.write_all(&[1]).await {
+                    eprintln!("[TCP] Error sending ack for chunk {chunk_id}: {e:?}");
+                }
 
                 let finished = done_clone.fetch_add(1, Ordering::SeqCst) + 1;
                 let expected = expected_clone.load(Ordering::SeqCst);

@@ -2,7 +2,12 @@ mod cli;
 mod discovery;
 mod protocol;
 mod transfer;
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    io::Write,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use clap::Parser;
 
@@ -25,14 +30,47 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Send { file, protocol } => {
             println!("Announcing presence via multicast");
+            let peers = Arc::new(Mutex::new(HashMap::new()));
+
             tokio::spawn(async {
-                let _ = discovery::start_broadcast(9000, 9001).await;
+                let _ = discovery::start_broadcast(9001, 9001).await;
             });
+
+            {
+                let peers_clone = peers.clone();
+                tokio::spawn(async move {
+                    let _ = discovery::start_listener(peers_clone).await;
+                });
+            }
+            println!("Discovering peers for 3 secs");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+            let list = discovery::get_peers(&peers);
+
+            if list.is_empty() {
+                println!("No peers found");
+                std::process::exit(1);
+            }
+            println!("Select a device to send to:\n ");
+            for (i, p) in list.iter().enumerate() {
+                println!("[{}] {} ({})", i, p.packet.hostname, p.addr.ip());
+            }
+
+            println!("Enter choice:");
+            std::io::stdout().flush().unwrap();
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).unwrap();
+            let idx: usize = input.trim().parse().unwrap();
+
+            let chosen = &list[idx];
+            let addr = format!("{}:{}", chosen.addr.ip(), chosen.packet.tcp_port);
+            println!("Sending to {} ({})", chosen.packet.hostname, addr);
+
             match protocol {
                 Protocol::Tcp => {
                     let start = Instant::now();
-                    let sender =
-                        protocol::tcp_send::TcpSender::new("127.0.0.1:9001".to_string(), file.clone());
+                    let sender = protocol::tcp_send::TcpSender::new(addr, file.clone());
                     let bytes_sent = sender.parallel_send().await?;
                     let time_taken = start.elapsed().as_secs_f64();
                     println!("Sent {} in {:.2} sec", format_bytes(bytes_sent), time_taken);
@@ -48,12 +86,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Receive { protocol } => match protocol {
             Protocol::Tcp => {
                 let server = protocol::tcp::TcpProtocol::new(9001);
-                server.start_server().await?;
+                server.start_server().await
             }
             Protocol::Quic => {
                 println!("QUIC WORK IN PROGRESS");
+                Ok(())
             }
         },
     }
-    Ok(())
 }
+

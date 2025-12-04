@@ -3,12 +3,11 @@ use std::time::Duration;
 
 use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
 use anyhow::Result;
+use async_channel;
 use memmap2::Mmap;
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio::{
-    fs::File,
-    io::{copy, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
@@ -78,93 +77,91 @@ impl TcpSender {
         drop(meta_conn);
 
         //create job queue
-        let (tx, rx) = mpsc::channel(chunk_count);
-        for id in 0..chunk_count{
+        let (tx, rx) = async_channel::bounded(chunk_count);
+        for id in 0..chunk_count {
             tx.send(id).await?;
         }
-        drop(tx); //close queue 
+        drop(tx); //close queue
 
         //spawn workers
         let mut handlers = vec![];
-        for _ in 0..WORKERS{
+        for _ in 0..WORKERS {
             let addr = self.addr.clone();
             let mmap_ref = mmap.clone();
             let mut rx = rx.clone();
 
-            let handle = tokio::spawn(async move{
-                while let Some(id) = rx.recv().await{
-                    let start = id*CHUNK_SIZE;
-                    let end = ((id+1)*CHUNK_SIZE).min(mmap_ref.len());
+            let handle = tokio::spawn(async move {
+                while let Ok(id) = rx.recv().await {
+                    let start = id * CHUNK_SIZE;
+                    let end = ((id + 1) * CHUNK_SIZE).min(mmap_ref.len());
                     let chunk = &mmap_ref[start..end];
                     let size = chunk.len() as u32;
 
-                    loop{
-                        match send_one_chunk(&addr,id as u32,chunk).await{
-                            Ok(_)=>break,
+                    loop {
+                        match Self::send_one_chunk(&addr, id as u32, chunk).await {
+                            Ok(_) => break,
                             Err(e) => {
-                                eprintln!("[TCP] Retry chunks {}:{}",id,e);
+                                eprintln!("[TCP] Retry chunks {}:{}", id, e);
                                 tokio::time::sleep(Duration::from_millis(200)).await;
                             }
-                        }
                         }
                     }
                 }
             });
-            handles.push(handle);
-
+            handlers.push(handle);
         }
-    for h in handles {
-        h.await?;
-    }
-    println!("[TCP] All chunks sent");
-    Ok(meta.size)
-}
-
-async fn send_one_chunk(addr:&str,id:u32,chunk:&[u8]) -> Result<()>{
-    let mut conn = timeout(Duration::from_secs(3), TcpStream::connect(addr)).await?;
-    conn.write_all(&id.to_le_bytes()).await?;
-    conn.write_all(&(chunk.len() as u32).to_le_bytes()).await?;
-    conn.write_all(chunk).await?;
-
-    let mut ack =[0u8;1];
-    conn.read_exact(&mut ack).await?;
-
-    if ack[0] != 1{
-        anyhow::bail!("Invalid ACK");
+        for h in handlers {
+            h.await?;
+        }
+        println!("[TCP] All chunks sent");
+        Ok(meta.size)
     }
 
-    println!("[TCP] Worker Sent Chunk {}",id);
-    Ok(())
+    async fn send_one_chunk(addr: &str, id: u32, chunk: &[u8]) -> Result<()> {
+        let mut conn = timeout(Duration::from_secs(3), TcpStream::connect(addr)).await??;
+        conn.write_all(&id.to_le_bytes()).await?;
+        conn.write_all(&(chunk.len() as u32).to_le_bytes()).await?;
+        conn.write_all(chunk).await?;
+
+        let mut ack = [0u8; 1];
+        conn.read_exact(&mut ack).await?;
+
+        if ack[0] != 1 {
+            anyhow::bail!("Invalid ACK");
+        }
+
+        println!("[TCP] Worker Sent Chunk {}", id);
+        Ok(())
+    }
 }
 
-
-        // let chunk_count = meta.chunk_count as usize;
-        //
-        // for chunk_id in 0..chunk_count {
-        //     let addr = self.addr.clone();
-        //     let start = chunk_id * CHUNK_SIZE;
-        //     let end = std::cmp::min(start + CHUNK_SIZE, mmap.len());
-        //     let chunk = mmap[start..end].to_vec();
-        //
-        //     let size = meta.size;
-        //     tokio::spawn(async move {
-        //         let mut conn = TcpStream::connect(&addr).await.unwrap();
-        //
-        //         conn.write_all(&(chunk_count as u32).to_le_bytes())
-        //             .await
-        //             .unwrap();
-        //         conn.write_all(&(size as u32).to_le_bytes()).await.unwrap(); // Send file size
-        //         conn.write_all(&(chunk_id as u32).to_le_bytes())
-        //             .await
-        //             .unwrap();
-        //         conn.write_all(&(chunk.len() as u32).to_le_bytes())
-        //             .await
-        //             .unwrap();
-        //         conn.write_all(&chunk).await.unwrap();
-        //
-        //         println!("[TCP] Sent chunk {}", chunk_id);
-        //     });
-        // }
-        // Ok(meta.size)
+// let chunk_count = meta.chunk_count as usize;
+//
+// for chunk_id in 0..chunk_count {
+//     let addr = self.addr.clone();
+//     let start = chunk_id * CHUNK_SIZE;
+//     let end = std::cmp::min(start + CHUNK_SIZE, mmap.len());
+//     let chunk = mmap[start..end].to_vec();
+//
+//     let size = meta.size;
+//     tokio::spawn(async move {
+//         let mut conn = TcpStream::connect(&addr).await.unwrap();
+//
+//         conn.write_all(&(chunk_count as u32).to_le_bytes())
+//             .await
+//             .unwrap();
+//         conn.write_all(&(size as u32).to_le_bytes()).await.unwrap(); // Send file size
+//         conn.write_all(&(chunk_id as u32).to_le_bytes())
+//             .await
+//             .unwrap();
+//         conn.write_all(&(chunk.len() as u32).to_le_bytes())
+//             .await
+//             .unwrap();
+//         conn.write_all(&chunk).await.unwrap();
+//
+//         println!("[TCP] Sent chunk {}", chunk_id);
+//     });
+// }
+// Ok(meta.size)
 //     }
 // }
