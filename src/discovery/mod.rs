@@ -25,7 +25,13 @@ pub struct DiscoveryPeer {
 
 // Broadcaster: sends "I exist" every 1 second
 pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
-    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    let local_ip = match local_ip_address::local_ip()? {
+        IpAddr::V4(v4) => v4,
+        _ => anyhow::bail!("IPv6 not supported for broadcast"),
+    };
+    println!("Broadcasting from IP: {}", local_ip);
+
+    let sock = UdpSocket::bind(format!("{}:0", local_ip)).await?;
 
     let addr: SocketAddrV4 = DISCOVERY_ADDR.parse::<SocketAddrV4>().unwrap();
 
@@ -47,13 +53,14 @@ pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
 
 // Listener: maintains a realtime list of discovered peers
 pub async fn start_listener(peers: Arc<Mutex<HashMap<String, DiscoveryPeer>>>) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:9999").await?;
-
     //join multicast
     let local_ip = match local_ip_address::local_ip()? {
         IpAddr::V4(v4) => v4,
         _ => anyhow::bail!("IPV6 not supported for discovery"),
     };
+    println!("Listening on IP: {}", local_ip);
+
+    let socket = UdpSocket::bind(format!("{}:9999", local_ip)).await?;
 
     socket.join_multicast_v4(Ipv4Addr::new(239, 255, 0, 1), local_ip)?;
 
