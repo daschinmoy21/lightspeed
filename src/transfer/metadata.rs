@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-pub const CHUNK_SIZE: usize = 4 * 1024 * 1024; //4 mb chunks
+pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024; //4 mb chunks
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FileMetadata {
@@ -15,7 +15,7 @@ impl FileMetadata {
     pub fn from_file(path: &str) -> Result<Self> {
         let meta = fs::metadata(path)?;
         let size = meta.len();
-        let chunk_count = (size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64;
+        let chunk_count = (size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
         Ok(Self {
             filename: path.into(),

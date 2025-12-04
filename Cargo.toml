@@ -10,7 +10,7 @@ bincode = "2.0.1"
 clap = { version = "4.4.18", features = ["derive"] }
 gethostname = "1.1.0"
 local-ip-address = "0.6.5"
-memmap2 = "0.9.9"
+nix = { version = "0.27", features = ["fs", "zerocopy"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.145"
 tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread", "net", "time", "fs", "io-util", "sync"] }
