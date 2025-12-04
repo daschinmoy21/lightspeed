@@ -4,8 +4,7 @@ use std::time::Duration;
 use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
 use anyhow::Result;
 use async_channel;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use std::os::fd::{self, AsRawFd};
+use memmap2::MmapOptions;
 use tokio::time::timeout;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -58,9 +57,9 @@ impl TcpSender {
     // }
 
     pub async fn parallel_send(&self) -> Result<u64> {
-        println!("[TCP] Parallel Sending to {}", self.addr);
-
-        let file = Arc::new(std::fs::File::open(&self.file_path)?);
+        println!("[TCP] Preparing file...");
+        let file = std::fs::File::open(&self.file_path)?;
+        let mmap = Arc::new(unsafe { MmapOptions::new().map(&file)? });
 
         let meta = FileMetadata::from_file(&self.file_path)?;
         println!("[TCP] Metadata:{:?}", meta);
@@ -77,85 +76,46 @@ impl TcpSender {
 
         //create job queue
         let (tx, rx) = async_channel::bounded(chunk_count as usize);
-        for id in 0..chunk_count {
-            tx.send(id).await?;
-        }
-        drop(tx); //close queue
 
-        //spawn workers
+        //spawn workers asynchronously (lazy connection)
         let mut handlers = vec![];
         for _ in 0..WORKERS {
             let addr = self.addr.clone();
-            let file = file.clone();
+            let mmap_ref = mmap.clone();
             let rx = rx.clone();
+            let meta = meta.clone();
 
             let handle = tokio::spawn(async move {
-                // Persistent connection
-                let mut conn = match timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
-                    Ok(Ok(c)) => {
-                        println!("[TCP] Worker connected to {}", addr);
-                        c
-                    }
-                    _ => {
-                        eprintln!("[TCP] Worker failed to connect to {}", addr);
-                        return;
-                    }
-                };
+                let mut conn: Option<TcpStream> = None;
 
                 while let Ok(id) = rx.recv().await {
+                    // Lazy connection: connect only on first chunk
+                    if conn.is_none() {
+                        conn = match timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+                            Ok(Ok(c)) => {
+                                println!("[TCP] Worker connected to {}", addr);
+                                Some(c)
+                            }
+                            _ => {
+                                eprintln!("[TCP] Worker failed to connect to {}", addr);
+                                return;
+                            }
+                        };
+                    }
+                    let conn = conn.as_mut().unwrap();
+
                     let start = id as u64 * CHUNK_SIZE;
                     let end = ((id as u64 + 1) * CHUNK_SIZE).min(meta.size);
-                    let chunk_len = (end - start) as usize;
+                    let chunk = &mmap_ref[start as usize..end as usize];
 
                     // Send chunk header
-                    if conn.write_all(&(id as u32).to_le_bytes()).await.is_err() {
-                        eprintln!("[TCP] Failed to send header for chunk {}", id);
-                        return;
-                    }
-                    if conn.write_all(&(chunk_len as u32).to_le_bytes()).await.is_err() {
-                        eprintln!("[TCP] Failed to send size for chunk {}", id);
-                        return;
-                    }
+                    if conn.write_all(&(id as u32).to_le_bytes()).await.is_err() { return; }
+                    if conn.write_all(&(chunk.len() as u32).to_le_bytes()).await.is_err() { return; }
 
-                    println!("[TCP] Sending chunk {} size {}", id, chunk_len);
+                    println!("[TCP] Sending chunk {} size {}", id, chunk.len());
 
-                    // Zero-copy send using sendfile
-                    let file_fd = file.as_raw_fd();
-                    let sock_fd = conn.as_raw_fd();
-                    let mut offset = start as i64;
-                    let mut remaining = chunk_len;
-                    while remaining > 0 {
-                        let to_send = remaining.min(0x7ffff000); // large chunk
-                        match tokio::task::spawn_blocking({
-                            let raw_sock_fd = sock_fd;
-                            let raw_file_fd = file_fd;
-                            move || {
-                                // Set socket to blocking mode for sendfile
-                                let flags = fcntl(raw_sock_fd, FcntlArg::F_GETFL)?;
-                                fcntl(raw_sock_fd, FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) & !OFlag::O_NONBLOCK))?;
-                                let sock_borrowed = unsafe { fd::BorrowedFd::borrow_raw(raw_sock_fd) };
-                                let file_borrowed = unsafe { fd::BorrowedFd::borrow_raw(raw_file_fd) };
-                                nix::sys::sendfile::sendfile(sock_borrowed, file_borrowed, Some(&mut offset), to_send)
-                            }
-                        }).await {
-                            Ok(Ok(sent)) => {
-                                if sent > 0 {
-                                    remaining -= sent;
-                                } else {
-                                    eprintln!("[TCP] Sendfile sent 0 for chunk {}", id);
-                                    return;
-                                }
-                            }
-                            Ok(Err(e)) => {
-                                eprintln!("[TCP] Sendfile error for chunk {}: {:?}", id, e);
-                                return;
-                            }
-                            Err(e) => {
-                                eprintln!("[TCP] Spawn blocking error for chunk {}: {:?}", id, e);
-                                return;
-                            }
-                        }
-                    }
+                    // Send chunk data
+                    if conn.write_all(chunk).await.is_err() { return; }
 
                     // Read ack
                     let mut ack = [0u8; 1];
@@ -173,14 +133,21 @@ impl TcpSender {
             });
             handlers.push(handle);
         }
+
+        println!("[TCP] Starting transfer...");
+
+        // Send chunks
+        for id in 0..chunk_count {
+            tx.send(id).await?;
+        }
+        drop(tx); //close queue
+
         for h in handlers {
             h.await?;
         }
         println!("[TCP] All chunks sent");
         Ok(meta.size)
     }
-
-
 }
 
 // let chunk_count = meta.chunk_count as usize;

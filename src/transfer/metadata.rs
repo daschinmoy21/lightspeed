@@ -5,7 +5,7 @@ use std::fs;
 
 pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024; //4 mb chunks
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileMetadata {
     pub filename: String,
     pub size: u64,
