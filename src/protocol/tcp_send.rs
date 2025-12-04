@@ -91,8 +91,14 @@ impl TcpSender {
             let handle = tokio::spawn(async move {
                 // Persistent connection
                 let mut conn = match timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
-                    Ok(Ok(c)) => c,
-                    _ => return,
+                    Ok(Ok(c)) => {
+                        println!("[TCP] Worker connected to {}", addr);
+                        c
+                    }
+                    _ => {
+                        eprintln!("[TCP] Worker failed to connect to {}", addr);
+                        return;
+                    }
                 };
 
                 while let Ok(id) = rx.recv().await {
@@ -101,8 +107,16 @@ impl TcpSender {
                     let chunk_len = (end - start) as usize;
 
                     // Send chunk header
-                    if conn.write_all(&(id as u32).to_le_bytes()).await.is_err() { return; }
-                    if conn.write_all(&(chunk_len as u32).to_le_bytes()).await.is_err() { return; }
+                    if conn.write_all(&(id as u32).to_le_bytes()).await.is_err() {
+                        eprintln!("[TCP] Failed to send header for chunk {}", id);
+                        return;
+                    }
+                    if conn.write_all(&(chunk_len as u32).to_le_bytes()).await.is_err() {
+                        eprintln!("[TCP] Failed to send size for chunk {}", id);
+                        return;
+                    }
+
+                    println!("[TCP] Sending chunk {} size {}", id, chunk_len);
 
                     // Zero-copy send using sendfile
                     let file_fd = file.as_raw_fd();
@@ -117,12 +131,24 @@ impl TcpSender {
                         )
                     }).await {
                         Ok(Ok(s)) if s == chunk_len => s,
-                        _ => return,
+                        Ok(Ok(s)) => {
+                            eprintln!("[TCP] Sendfile sent {} instead of {} for chunk {}", s, chunk_len, id);
+                            return;
+                        }
+                        _ => {
+                            eprintln!("[TCP] Sendfile failed for chunk {}", id);
+                            return;
+                        }
                     };
 
                     // Read ack
                     let mut ack = [0u8; 1];
-                    if conn.read_exact(&mut ack).await.is_err() || ack[0] != 1 {
+                    if conn.read_exact(&mut ack).await.is_err() {
+                        eprintln!("[TCP] Failed to read ack for chunk {}", id);
+                        return;
+                    }
+                    if ack[0] != 1 {
+                        eprintln!("[TCP] Invalid ack for chunk {}", id);
                         return;
                     }
 
