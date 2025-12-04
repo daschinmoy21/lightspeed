@@ -106,12 +106,13 @@ impl TcpProtocol {
             });
 
             // Check if done
-            if done.load(Ordering::SeqCst) == expected_chunks.load(Ordering::SeqCst)
-                && expected_chunks.load(Ordering::SeqCst) > 0
-            {
-                println!("[TCP] All chunks received");
+            let current_done = done.load(Ordering::SeqCst);
+            let current_expected = expected_chunks.load(Ordering::SeqCst);
+            if current_done == current_expected && current_expected > 0 {
+                println!("[TCP] All chunks received ({} / {})", current_done, current_expected);
 
                 // Verify file integrity
+                println!("[TCP] Verifying file integrity...");
                 match std::fs::File::open(&output_file) {
                     Ok(mut file) => {
                         let mut hasher = Sha256::new();
