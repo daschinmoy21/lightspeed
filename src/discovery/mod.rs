@@ -44,10 +44,10 @@ pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
     sock.set_multicast_ttl_v4(1)?;
 
     let bytes = serde_json::to_vec(&packet)?;
+    println!("Broadcasting discovery packets every second...");
 
     loop {
         sock.send_to(&bytes, addr).await?;
-        println!("Sent discovery packet");
         time::sleep(Duration::from_secs(1)).await;
     }
 }
@@ -63,13 +63,12 @@ pub async fn start_listener(peers: Arc<Mutex<HashMap<String, DiscoveryPeer>>>) -
 
     let socket = UdpSocket::bind("0.0.0.0:9999").await?;
 
-    socket.join_multicast_v4(Ipv4Addr::new(239, 255, 0, 1), local_ip)?;
+    socket.join_multicast_v4(Ipv4Addr::new(239, 255, 0, 1), Ipv4Addr::UNSPECIFIED)?;
 
     let mut buf = vec![0u8;2048];
 
     loop{
         let (len, addr) = socket.recv_from(&mut buf ).await?;
-        println!("Received UDP packet from {}", addr);
         if let Ok(packet) = serde_json::from_slice::<DiscoveryPacket>(&buf[..len]) {
             match addr {
                 SocketAddr::V4(v4_addr) => {
