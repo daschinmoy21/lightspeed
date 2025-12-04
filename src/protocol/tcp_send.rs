@@ -11,7 +11,7 @@ use tokio::{
     net::TcpStream,
 };
 
-const WORKERS: usize = 6;
+const WORKERS: usize = 10;
 
 pub struct TcpSender {
     pub addr: String,
