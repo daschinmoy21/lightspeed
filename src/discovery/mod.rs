@@ -31,7 +31,7 @@ pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
     };
     println!("Broadcasting from IP: {}", local_ip);
 
-    let sock = UdpSocket::bind(format!("{}:0", local_ip)).await?;
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
 
     let addr: SocketAddrV4 = DISCOVERY_ADDR.parse::<SocketAddrV4>().unwrap();
 
@@ -47,6 +47,7 @@ pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
 
     loop {
         sock.send_to(&bytes, addr).await?;
+        println!("Sent discovery packet");
         time::sleep(Duration::from_secs(1)).await;
     }
 }
@@ -60,7 +61,7 @@ pub async fn start_listener(peers: Arc<Mutex<HashMap<String, DiscoveryPeer>>>) -
     };
     println!("Listening on IP: {}", local_ip);
 
-    let socket = UdpSocket::bind(format!("{}:9999", local_ip)).await?;
+    let socket = UdpSocket::bind("0.0.0.0:9999").await?;
 
     socket.join_multicast_v4(Ipv4Addr::new(239, 255, 0, 1), local_ip)?;
 
@@ -68,6 +69,7 @@ pub async fn start_listener(peers: Arc<Mutex<HashMap<String, DiscoveryPeer>>>) -
 
     loop{
         let (len, addr) = socket.recv_from(&mut buf ).await?;
+        println!("Received UDP packet from {}", addr);
         if let Ok(packet) = serde_json::from_slice::<DiscoveryPacket>(&buf[..len]) {
             match addr {
                 SocketAddr::V4(v4_addr) => {
