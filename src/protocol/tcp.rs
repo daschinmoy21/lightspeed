@@ -66,42 +66,46 @@ impl TcpProtocol {
             let size_clone = file_size.clone();
 
             tokio::spawn(async move {
-                let mut id_buf = [0u8; 4];
-                if socket.read_exact(&mut id_buf).await.is_err() {
-                    eprintln!("[TCP] Failed to read chunk id");
-                    return;
-                }
-                let chunk_id = u32::from_le_bytes(id_buf) as u64;
+                loop {
+                    let mut id_buf = [0u8; 4];
+                    if socket.read_exact(&mut id_buf).await.is_err() {
+                        // Connection closed or error
+                        break;
+                    }
+                    let chunk_id = u32::from_le_bytes(id_buf) as u64;
 
-                let mut size_buf = [0u8; 4];
-                if socket.read_exact(&mut size_buf).await.is_err() {
-                    eprintln!("[TCP] Failed to read chunk size for {}", chunk_id);
-                    return;
-                }
-                let chunk_size = u32::from_le_bytes(size_buf) as u64;
-                let chunk_size_usize = chunk_size as usize;
-                let mut chunk_data = vec![0u8; chunk_size_usize];
-                if socket.read_exact(&mut chunk_data).await.is_err() {
-                    eprintln!("[TCP] Failed to read chunk data for {}", chunk_id);
-                    return;
-                }
+                    let mut size_buf = [0u8; 4];
+                    if socket.read_exact(&mut size_buf).await.is_err() {
+                        eprintln!("[TCP] Failed to read chunk size for {}", chunk_id);
+                        break;
+                    }
+                    let chunk_size = u32::from_le_bytes(size_buf) as u64;
+                    let chunk_size_usize = chunk_size as usize;
+                    let mut chunk_data = vec![0u8; chunk_size_usize];
+                    if socket.read_exact(&mut chunk_data).await.is_err() {
+                        eprintln!("[TCP] Failed to read chunk data for {}", chunk_id);
+                        break;
+                    }
 
-                println!("[TCP] Received chunk {} size {}", chunk_id, chunk_size);
+                    println!("[TCP] Received chunk {} size {}", chunk_id, chunk_size);
 
-                let offset = chunk_id * CHUNK_SIZE as u64;
+                    let offset = chunk_id * CHUNK_SIZE as u64;
 
-                let mut file = out_clone.lock().await;
-                if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-                    eprintln!("[TCP] Error seeking to chunk {chunk_id}: {e:?}");
-                    return;
-                }
-                if let Err(e) = file.write_all(&chunk_data).await {
-                    eprintln!("[TCP] Error writing chunk {chunk_id}: {e:?}");
-                    return;
-                }
-                println!("[TCP] Wrote chunk {}", chunk_id);
-                if let Err(e) = socket.write_all(&[1]).await {
-                    eprintln!("[TCP] Error sending ack for chunk {chunk_id}: {e:?}");
+                    let mut file = out_clone.lock().await;
+                    if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                        eprintln!("[TCP] Error seeking to chunk {chunk_id}: {e:?}");
+                        break;
+                    }
+                    if let Err(e) = file.write_all(&chunk_data).await {
+                        eprintln!("[TCP] Error writing chunk {chunk_id}: {e:?}");
+                        break;
+                    }
+                    println!("[TCP] Wrote chunk {}", chunk_id);
+                    done_clone.fetch_add(1, Ordering::SeqCst);
+                    if let Err(e) = socket.write_all(&[1]).await {
+                        eprintln!("[TCP] Error sending ack for chunk {chunk_id}: {e:?}");
+                        break;
+                    }
                 }
             });
 
