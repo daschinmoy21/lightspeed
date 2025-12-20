@@ -1,4 +1,4 @@
-use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
+use crate::transfer::metadata::FileMetadata;
 use anyhow::Result;
 use std::path::Path;
 use std::sync::{
@@ -116,7 +116,7 @@ impl TcpProtocol {
 
                     println!("[TCP] Received chunk {} size {}", chunk_id, chunk_size);
 
-                    let offset = chunk_id * CHUNK_SIZE as u64;
+                    let offset = chunk_id * meta.chunk_size;
 
                     let mut file = out_clone.lock().await;
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {

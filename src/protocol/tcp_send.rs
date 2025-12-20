@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
+use crate::transfer::metadata::FileMetadata;
 use anyhow::Result;
 use async_channel;
 use memmap2::MmapOptions;
@@ -131,8 +131,8 @@ impl TcpSender {
                     }
                     let conn = conn.as_mut().unwrap();
 
-                    let start = id as u64 * CHUNK_SIZE;
-                    let end = ((id as u64 + 1) * CHUNK_SIZE).min(meta.size);
+                    let start = id as u64 * meta.chunk_size;
+                    let end = ((id as u64 + 1) * meta.chunk_size).min(meta.size);
                     let chunk = &mmap_ref[start as usize..end as usize];
                     
                     // Compute BLAKE3 hash of the chunk

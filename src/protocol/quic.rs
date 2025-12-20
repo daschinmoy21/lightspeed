@@ -1,6 +1,6 @@
-use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
+use crate::transfer::metadata::FileMetadata;
 use anyhow::Result;
-use quinn::{Endpoint, RecvStream, SendStream};
+use quinn::Endpoint;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::io::AsyncWriteExt;
 
@@ -172,6 +172,7 @@ impl QuicProtocol {
                             let file_ref = file.clone();
                             let done_ref = done_chunks.clone();
                             let total_chunks = meta.chunk_count;
+                            let meta = meta.clone(); // Need meta for chunk_size inside task
 
                             tokio::spawn(async move {
                                 // Read Chunk Header: [ID: u32][Size: u32][Hash: 32 bytes]
@@ -197,7 +198,7 @@ impl QuicProtocol {
                                 }
 
                                 // Write to disk (Parallel safe PWRITE)
-                                let offset = chunk_id * CHUNK_SIZE;
+                                let offset = chunk_id * meta.chunk_size;
                                 if let Err(e) = file_ref.write_all_at(&data, offset) {
                                     eprintln!("[QUIC] Disk write error chunk {}: {}", chunk_id, e);
                                     return;
@@ -272,8 +273,8 @@ impl QuicProtocol {
                 let _permit = permit; // Hold permit until task done
                 let chunk_id = id;
                 
-                let start = chunk_id * CHUNK_SIZE;
-                let end = ((chunk_id + 1) * CHUNK_SIZE).min(meta.size);
+                let start = chunk_id * meta.chunk_size;
+                let end = ((chunk_id + 1) * meta.chunk_size).min(meta.size);
                 let chunk_data = &mmap[start as usize..end as usize];
                 
                 let hash = blake3::hash(chunk_data);
