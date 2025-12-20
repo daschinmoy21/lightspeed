@@ -25,14 +25,21 @@ pub struct DiscoveryPeer {
 
 // Broadcaster: sends "I exist" every 1 second
 pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
+    // LEARN: We need the local IP to log it, but for broadcasting we bind to 0.0.0.0.
+    // Finding the "correct" local IP is surprisingly hard (machines have many interfaces).
     let local_ip = match local_ip_address::local_ip()? {
         IpAddr::V4(v4) => v4,
         _ => anyhow::bail!("IPv6 not supported for broadcast"),
     };
     println!("Broadcasting from IP: {}", local_ip);
 
+    // LEARN: Bind to port 0 to let the OS assign an ephemeral port.
+    // PRO TIP: On some OSes, binding to a specific IP might prevent multicast from working correctly
+    // or routing to the wrong interface. 0.0.0.0 is usually safest for multicast triggers.
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
 
+    // Multicast address: 239.255.0.1 is in the "Local Administrative Scope"
+    // Port 9999 is arbitrary but must match the listener.
     let addr: SocketAddrV4 = DISCOVERY_ADDR.parse::<SocketAddrV4>().unwrap();
 
     let packet = DiscoveryPacket {
@@ -41,12 +48,16 @@ pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
         quic_port,
     };
 
+    // LEARN: TTL=1 means packets won't leave the local network segment.
+    // Important for security and reducing noise.
     sock.set_multicast_ttl_v4(1)?;
 
     let bytes = serde_json::to_vec(&packet)?;
     println!("Broadcasting discovery packets every second...");
 
     loop {
+        // ERROR HANDLING: If this fails (e.g. network down), we panic/exit.
+        // A robust app might log and retry.
         sock.send_to(&bytes, addr).await?;
         time::sleep(Duration::from_secs(1)).await;
     }
@@ -61,8 +72,10 @@ pub async fn start_listener(peers: Arc<Mutex<HashMap<String, DiscoveryPeer>>>) -
     };
     println!("Listening on IP: {}", local_ip);
 
+    // LEARN: Bind to 0.0.0.0:9999 to catch multicast packets addressed to this port.
     let socket = UdpSocket::bind("0.0.0.0:9999").await?;
 
+    // CRITICAL: You MUST explicitly join the multicast group to receive packets.
     socket.join_multicast_v4(Ipv4Addr::new(239, 255, 0, 1), Ipv4Addr::UNSPECIFIED)?;
 
     let mut buf = vec![0u8;2048];

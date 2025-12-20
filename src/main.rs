@@ -76,7 +76,15 @@ async fn main() -> anyhow::Result<()> {
                     println!("Sent {} in {:.2} sec", format_bytes(bytes_sent), time_taken);
                 }
                 Protocol::Quic => {
-                    println!("QUIC WORK IN PROGRESS");
+                    println!("Sending via QUIC...");
+                    let start = Instant::now();
+                    match protocol::quic::QuicProtocol::send_file(addr, file.clone()).await {
+                        Ok(bytes) => {
+                            let time = start.elapsed().as_secs_f64();
+                            println!("Sent {} in {:.2}s via QUIC", format_bytes(bytes), time);
+                        }
+                        Err(e) => eprintln!("QUIC Send Error: {}", e),
+                    }
                 }
             }
             loop {
@@ -87,15 +95,18 @@ async fn main() -> anyhow::Result<()> {
             Protocol::Tcp => {
                 // Announce presence
                 tokio::spawn(async {
-                    let _ = discovery::start_broadcast(9001, 9001).await;
+                    let _ = discovery::start_broadcast(9001, 9003).await; // Advertise TCP 9001, QUIC 9003
                 });
 
                 let server = protocol::tcp::TcpProtocol::new(9001);
                 server.start_server().await
             }
             Protocol::Quic => {
-                println!("QUIC WORK IN PROGRESS");
-                Ok(())
+                tokio::spawn(async {
+                    let _ = discovery::start_broadcast(9001, 9003).await;
+                });
+                println!("Starting QUIC server on 9003...");
+                protocol::quic::QuicProtocol::start_server(9003).await
             }
         },
     }

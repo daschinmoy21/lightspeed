@@ -1,6 +1,5 @@
 use crate::transfer::metadata::{FileMetadata, CHUNK_SIZE};
 use anyhow::Result;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -47,6 +46,9 @@ impl TcpProtocol {
         let expected_chunks = Arc::new(AtomicUsize::new(meta.chunk_count as usize));
         let file_size = Arc::new(AtomicUsize::new(meta.size as usize));
 
+        // Open the file for writing
+        // LEARN: We use OpenOptions to create/overwrite.
+        // `set_len` pre-allocates space on disk, which helps reduce fragmentation and ensures we have enough space.
         let mut out = OpenOptions::new()
             .write(true)
             .create(true)
@@ -54,6 +56,14 @@ impl TcpProtocol {
             .open(&output_file)
             .await?;
         out.set_len(meta.size as u64).await?;
+        
+        // CRITICAL PERFORMANCE NOTE:
+        // We are wrapping the file in an Async Mutex.
+        // This means only ONE worker thread can write to the file at a time.
+        // Even though we receive chunks in parallel, we serialize the writing.
+        // Better approach: `File` on Linux behaves well with parallel `pwrite` (or `write_at`),
+        // but `tokio::fs::File` requires mutable access for `seek+write`.
+        // A `std::fs::File` with `spawn_blocking` or using `positioned-io` crates might be faster.
         let out = Arc::new(Mutex::new(out));
 
         loop {
@@ -80,10 +90,27 @@ impl TcpProtocol {
                         break;
                     }
                     let chunk_size = u32::from_le_bytes(size_buf) as u64;
+                    
+                    // Read Hash
+                    let mut hash_buf = [0u8; 32];
+                    if socket.read_exact(&mut hash_buf).await.is_err() {
+                        eprintln!("[TCP] Failed to read chunk hash for {}", chunk_id);
+                        break;
+                    }
+
                     let chunk_size_usize = chunk_size as usize;
                     let mut chunk_data = vec![0u8; chunk_size_usize];
                     if socket.read_exact(&mut chunk_data).await.is_err() {
                         eprintln!("[TCP] Failed to read chunk data for {}", chunk_id);
+                        break;
+                    }
+
+                    // VERIFY HASH
+                    let calculated_hash = blake3::hash(&chunk_data);
+                    if calculated_hash.as_bytes() != &hash_buf {
+                        eprintln!("[TCP] Hash mismatch for chunk {}! Data corrupted.", chunk_id);
+                        // In a real protocol, we would send a specific NACK code here.
+                        // For now, we break/close connection which will trigger retry if implemented.
                         break;
                     }
 
@@ -110,30 +137,17 @@ impl TcpProtocol {
             });
 
             // Check if done
+            // LEARN: We use atomic loads to check shared state across threads without locking.
             let current_done = done.load(Ordering::SeqCst);
             let current_expected = expected_chunks.load(Ordering::SeqCst);
             if current_done == current_expected && current_expected > 0 {
                 println!("[TCP] All chunks received ({} / {})", current_done, current_expected);
 
-                // Verify file integrity
-                println!("[TCP] Verifying file integrity...");
-                match std::fs::File::open(&output_file) {
-                    Ok(mut file) => {
-                        let mut hasher = Sha256::new();
-                        if std::io::copy(&mut file, &mut hasher).is_ok() {
-                            let received_hash = format!("{:x}", hasher.finalize());
-                            if received_hash == meta.hash {
-                                println!("[TCP] File integrity verified successfully");
-                            } else {
-                                eprintln!("[TCP] Hash mismatch! Expected {}, got {}", meta.hash, received_hash);
-                            }
-                        } else {
-                            eprintln!("[TCP] Failed to compute hash of received file");
-                        }
-                    }
-                    Err(e) => eprintln!("[TCP] Failed to open received file for verification: {}", e),
-                }
+                println!("[TCP] All chunks received ({} / {})", current_done, current_expected);
 
+                // NOTE: Global file integrity check is removed in favor of per-chunk BLAKE3 verification.
+                println!("[TCP] File received successfully.");
+                
                 break;
             }
         }
