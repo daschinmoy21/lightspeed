@@ -72,19 +72,25 @@ impl TcpSender {
     //     Ok(total_sent)
     // }
 
-    pub async fn parallel_send(&self) -> Result<u64> {
-        println!("[TCP] Preparing file...");
+    pub async fn parallel_send(&self, progress_tx: Option<tokio::sync::mpsc::Sender<crate::ui::ProgressEvent>>) -> Result<u64> {
+        // println!("[TCP] Preparing file...");
         let file = std::fs::File::open(&self.file_path)?;
-        // SAFETY: Mmap is unsafe because if the underlying file is modified (truncated)
-        // while mapped, accessing the memory can cause a SIGBUS (crash).
-        // Ensure no other process is modifying this file during transfer.
-        // NOTE: This is NOT `sendfile`. This brings the file into the process virtual memory (mmap)
-        // and then writes it to the socket. It avoids user-space buffer copies but is different from kernel-side sendfile.
+        // SAFETY: Mmap is unsafe...
+        // ...
         let mmap = Arc::new(unsafe { MmapOptions::new().map(&file)? });
 
         let meta = FileMetadata::from_file(&self.file_path)?;
         println!("[TCP] Metadata:{:?}", meta);
         let chunk_count = meta.chunk_count as usize;
+
+        // Send Started Event
+        if let Some(tx) = &progress_tx {
+            let _ = tx.send(crate::ui::ProgressEvent::Started {
+                total_chunks: meta.chunk_count,
+                total_size: meta.size,
+                filename: meta.filename.clone(),
+            }).await;
+        }
 
         // Send metadata first
         let mut meta_conn = TcpStream::connect(&self.addr).await?;
@@ -103,31 +109,28 @@ impl TcpSender {
         println!("[TCP] Optimizing: Using {} workers for {} file", worker_count, crate::format_bytes(meta.size));
 
         //spawn workers asynchronously (lazy connection)
-        let mut handlers = vec![];
+        let mut join_set = tokio::task::JoinSet::new();
+        
         for _ in 0..worker_count {
             let addr = self.addr.clone();
             let mmap_ref = mmap.clone();
             let rx = rx.clone();
             let meta = meta.clone();
+            let progress_tx_clone = progress_tx.clone();
 
-            let handle = tokio::spawn(async move {
+            join_set.spawn(async move {
                 let mut conn: Option<TcpStream> = None;
 
                 while let Ok(id) = rx.recv().await {
                     // Lazy connection: connect only on first chunk
                     if conn.is_none() {
-                        conn = match timeout(Duration::from_secs(3), TcpStream::connect(&addr))
-                            .await
-                        {
-                            Ok(Ok(c)) => {
-                                println!("[TCP] Worker connected to {}", addr);
-                                Some(c)
-                            }
-                            _ => {
-                                eprintln!("[TCP] Worker failed to connect to {}", addr);
-                                return;
-                            }
-                        };
+                        conn = Some(
+                            timeout(Duration::from_secs(5), TcpStream::connect(&addr))
+                                .await
+                                .map_err(|_| anyhow::anyhow!("Connection timeout to {}", addr))?
+                                .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {}", addr, e))?
+                        );
+                        println!("[TCP] Worker connected to {}", addr);
                     }
                     let conn = conn.as_mut().unwrap();
 
@@ -138,63 +141,74 @@ impl TcpSender {
                     // Compute BLAKE3 hash of the chunk
                     let hash = blake3::hash(chunk);
 
-                    // Send chunk header
-                    // Protocol: [ID: u32][Size: u32][Hash: 32 bytes]
-                    if conn.write_all(&(id as u32).to_le_bytes()).await.is_err() {
-                        return;
-                    }
-                    if conn
-                        .write_all(&(chunk.len() as u32).to_le_bytes())
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    if conn.write_all(hash.as_bytes()).await.is_err() {
-                        return;
+                    let mut retries = 0;
+                    loop {
+                        // Send chunk header
+                        conn.write_all(&(id as u32).to_le_bytes()).await?;
+                        conn.write_all(&(chunk.len() as u32).to_le_bytes()).await?;
+                        conn.write_all(hash.as_bytes()).await?;
+
+                        // Send chunk data
+                        conn.write_all(chunk).await?;
+
+                        // Read ack
+                        let mut ack = [0u8; 1];
+                        conn.read_exact(&mut ack).await?;
+                        
+                        if ack[0] == 1 {
+                             // ACK
+                             break;
+                        } else {
+                            // NACK
+                            retries += 1;
+                            if retries > 5 {
+                                return Err(anyhow::anyhow!("Chunk {} failed after 5 retries. Network unsuitable?", id));
+                            }
+                            eprintln!("[TCP] Received NACK for chunk {}. Retrying ({}/5)...", id, retries);
+                            if let Some(tx) = &progress_tx_clone {
+                                let _ = tx.send(crate::ui::ProgressEvent::Error(format!("Chunk {} NACK retry {}/5", id, retries))).await;
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await; // Backoff
+                        }
                     }
 
-                    println!("[TCP] Sending chunk {} size {}", id, chunk.len());
-
-                    // Send chunk data
-                    if conn.write_all(chunk).await.is_err() {
-                        return;
+                    // println!("[TCP] Worker sent chunk {}", id); // Remove spammy print
+                    if let Some(tx) = &progress_tx_clone {
+                        let _ = tx.send(crate::ui::ProgressEvent::ChunkSent { chunk_id: id, size: chunk.len() }).await;
                     }
-
-                    // Read ack
-                    let mut ack = [0u8; 1];
-                    if conn.read_exact(&mut ack).await.is_err() {
-                        eprintln!("[TCP] Failed to read ack for chunk {}", id);
-                        return;
-                    }
-                    if ack[0] != 1 {
-                        eprintln!("[TCP] Invalid ack for chunk {} - Retrying logic needed", id);
-                        return;
-                    }
-
-                    println!("[TCP] Worker sent chunk {}", id);
-                    // CRITICAL FLAW: If any error occurs above (e.g. write triggers EPIPE),
-                    // this worker effectively "swallows" the error by just returning from the closure.
-                    // The main thread continues waiting for all chunks to be processed, potentially hanging
-                    // if the channel doesn't empty or if logic implies complete success.
-                    // A better design would return a Result and use a join set or error channel.
                 }
+                Ok::<(), anyhow::Error>(())
             });
-            handlers.push(handle);
         }
 
-        println!("[TCP] Starting transfer...");
+        // println!("[TCP] Starting transfer...");
 
-        // Send chunks
+        // Send chunks to queue
         for id in 0..chunk_count {
-            tx.send(id).await?;
+            tx.send(id as u64).await?;
         }
-        drop(tx); //close queue
+        drop(tx); // close queue so workers break loop when empty
 
-        for h in handlers {
-            h.await?;
+        // Wait for workers and check for errors
+        while let Some(res) = join_set.join_next().await {
+             match res {
+                 Ok(Ok(())) => {}, // Worker finished successfully
+                 Ok(Err(e)) => {
+                     // A worker failed with an internal error (e.g. Broken Pipe)
+                     return Err(anyhow::anyhow!("Worker failed: {}", e));
+                 },
+                 Err(e) => {
+                     // A worker panicked or was cancelled
+                     return Err(anyhow::anyhow!("Worker panicked: {}", e));
+                 }
+             }
         }
-        println!("[TCP] All chunks sent");
+
+        if let Some(tx) = &progress_tx {
+            let _ = tx.send(crate::ui::ProgressEvent::Done).await;
+        }
+
+        // println!("[TCP] All chunks sent");
         Ok(meta.size)
     }
 }

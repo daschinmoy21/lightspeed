@@ -2,7 +2,7 @@ use crate::transfer::metadata::FileMetadata;
 use anyhow::Result;
 use quinn::Endpoint;
 use std::{net::SocketAddr, sync::Arc};
-use tokio::io::AsyncWriteExt;
+
 
 // --- QUIC Helper Configuration (Certificates) ---
 
@@ -96,11 +96,11 @@ impl QuicProtocol {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let endpoint = Endpoint::server(server_config, addr)?;
         
-        println!("[QUIC] Listening on {}", endpoint.local_addr()?);
+        // println!("[QUIC] Listening on {}", endpoint.local_addr()?);
 
         while let Some(conn) = endpoint.accept().await {
             let conn = conn.await?;
-            println!("[QUIC] Connection accepted from {}", conn.remote_address());
+            // println!("[QUIC] Connection accepted from {}", conn.remote_address());
             
             tokio::spawn(async move {
                 // Main Connection Loop
@@ -141,7 +141,7 @@ impl QuicProtocol {
                 };
                 
                 let output_file = format!("quic_rec_{}", meta.filename); // Simple rename for test
-                println!("[QUIC] Receiving file: {} ({} chunks)", output_file, meta.chunk_count);
+                // println!("[QUIC] Receiving file: {} ({} chunks)", output_file, meta.chunk_count);
 
                 // Prepare Output File
                 // Using std::fs::File with pre-allocation (similar to TCP)
@@ -206,13 +206,13 @@ impl QuicProtocol {
 
                                 let finished = done_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                                 if finished % 100 == 0 || finished == total_chunks {
-                                    println!("[QUIC] Progress: {}/{}", finished, total_chunks);
+                                    // println!("[QUIC] Progress: {}/{}", finished, total_chunks);
                                 }
                             });
                         }
                         Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
                             // Normal close
-                            println!("[QUIC] Transfer complete (connection closed by sender).");
+                            // println!("[QUIC] Transfer complete (connection closed by sender).");
                             break;
                         }
                         Err(_e) => {
@@ -226,7 +226,7 @@ impl QuicProtocol {
         Ok(())
     }
 
-    pub async fn send_file(addr_str: String, file_path: String) -> Result<u64> {
+    pub async fn send_file(addr_str: String, file_path: String, progress_tx: Option<tokio::sync::mpsc::Sender<crate::ui::ProgressEvent>>) -> Result<u64> {
         let addr: SocketAddr = addr_str.parse()?;
         let client_config = make_client_config();
         
@@ -234,15 +234,24 @@ impl QuicProtocol {
         let mut endpoint = Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
         endpoint.set_default_client_config(client_config);
 
-        println!("[QUIC] Connecting to {}...", addr);
+        // println!("[QUIC] Connecting to {}...", addr);
         let connection = endpoint.connect(addr, "localhost")?.await?;
-        println!("[QUIC] Connected!");
+        // println!("[QUIC] Connected!");
 
         // Read File & Meta
         let file = std::fs::File::open(&file_path)?;
         let meta = FileMetadata::from_file(&file_path)?;
         // Safety: Mmap
         let mmap = Arc::new(unsafe { memmap2::MmapOptions::new().map(&file)? });
+
+        // Send Started Event
+        if let Some(tx) = &progress_tx {
+            let _ = tx.send(crate::ui::ProgressEvent::Started {
+                total_chunks: meta.chunk_count,
+                total_size: meta.size,
+                filename: meta.filename.clone(),
+            }).await;
+        }
 
         // 1. Send Metadata (First Uni Stream)
         let mut meta_stream = connection.open_uni().await?;
@@ -268,6 +277,7 @@ impl QuicProtocol {
             let permit = semaphore.clone().acquire_owned().await?;
             let conn = conn_arc.clone();
             let mmap = mmap.clone();
+            let progress_tx_clone = progress_tx.clone();
             
             joins.push(tokio::spawn(async move {
                 let _permit = permit; // Hold permit until task done
@@ -288,11 +298,19 @@ impl QuicProtocol {
                         header.extend_from_slice(&(chunk_data.len() as u32).to_le_bytes());
                         header.extend_from_slice(hash.as_bytes());
 
-                        stream.write_all(&header).await.ok();
                         stream.write_all(chunk_data).await.ok();
                         stream.finish().ok();
+
+                        if let Some(tx) = &progress_tx_clone {
+                            let _ = tx.send(crate::ui::ProgressEvent::ChunkSent { chunk_id, size: chunk_data.len() }).await;
+                        }
                     },
-                    Err(e) => eprintln!("[QUIC] Failed to open stream for chunk {}: {}", chunk_id, e),
+                    Err(e) => {
+                        eprintln!("[QUIC] Failed to open stream for chunk {}: {}", chunk_id, e);
+                         if let Some(tx) = &progress_tx_clone {
+                            let _ = tx.send(crate::ui::ProgressEvent::Error(format!("Chunk {} open stream failed: {}", chunk_id, e))).await;
+                        }
+                    },
                 }
             }));
         }
@@ -300,6 +318,10 @@ impl QuicProtocol {
         // Wait for all
         for j in joins {
             j.await?;
+        }
+        
+        if let Some(tx) = &progress_tx {
+            let _ = tx.send(crate::ui::ProgressEvent::Done).await;
         }
         
         // Graceful close

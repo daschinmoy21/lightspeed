@@ -27,11 +27,11 @@ pub struct DiscoveryPeer {
 pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
     // LEARN: We need the local IP to log it, but for broadcasting we bind to 0.0.0.0.
     // Finding the "correct" local IP is surprisingly hard (machines have many interfaces).
-    let local_ip = match local_ip_address::local_ip()? {
+    let _local_ip = match local_ip_address::local_ip()? {
         IpAddr::V4(v4) => v4,
         _ => anyhow::bail!("IPv6 not supported for broadcast"),
     };
-    println!("Broadcasting from IP: {}", local_ip);
+    // println!("Broadcasting from IP: {}", local_ip);
 
     // LEARN: Bind to port 0 to let the OS assign an ephemeral port.
     // PRO TIP: On some OSes, binding to a specific IP might prevent multicast from working correctly
@@ -53,7 +53,7 @@ pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
     sock.set_multicast_ttl_v4(1)?;
 
     let bytes = serde_json::to_vec(&packet)?;
-    println!("Broadcasting discovery packets every second...");
+    // println!("Broadcasting discovery packets every second...");
 
     loop {
         // ERROR HANDLING: If this fails (e.g. network down), we panic/exit.
@@ -66,14 +66,30 @@ pub async fn start_broadcast(tcp_port: u16, quic_port: u16) -> Result<()> {
 // Listener: maintains a realtime list of discovered peers
 pub async fn start_listener(peers: Arc<Mutex<HashMap<String, DiscoveryPeer>>>) -> Result<()> {
     //join multicast
-    let local_ip = match local_ip_address::local_ip()? {
+    let _local_ip = match local_ip_address::local_ip()? {
         IpAddr::V4(v4) => v4,
         _ => anyhow::bail!("IPV6 not supported for discovery"),
     };
-    println!("Listening on IP: {}", local_ip);
+    // println!("Listening on IP: {}", local_ip);
 
-    // LEARN: Bind to 0.0.0.0:9999 to catch multicast packets addressed to this port.
-    let socket = UdpSocket::bind("0.0.0.0:9999").await?;
+    // LEARN: Use socket2 to enable SO_REUSEADDR (and SO_REUSEPORT on some OSs)
+    // This allows multiple instances on the same machine to bind to 9999.
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+
+    // Enable reuse address (critical for multicast on same machine)
+    socket.set_reuse_address(true)?;
+    // #[cfg(not(windows))]
+    // socket.set_reuse_port(true)?; // Helper for unix
+
+    socket.bind(&"0.0.0.0:9999".parse::<SocketAddr>()?.into())?;
+    
+    // Convert back to Tokio socket
+    socket.set_nonblocking(true)?;
+    let socket = UdpSocket::from_std(std::net::UdpSocket::from(socket))?;
 
     // CRITICAL: You MUST explicitly join the multicast group to receive packets.
     socket.join_multicast_v4(Ipv4Addr::new(239, 255, 0, 1), Ipv4Addr::UNSPECIFIED)?;
@@ -93,12 +109,12 @@ pub async fn start_listener(peers: Arc<Mutex<HashMap<String, DiscoveryPeer>>>) -
                         packet: packet.clone(),
                     };
                     let mut map = peers.lock().unwrap();
-                    let is_new = !map.contains_key(&key);
+                    let _is_new = !map.contains_key(&key);
                     map.insert(key, peer);
 
-                    if is_new {
-                        println!("Peer Discovered: {} -> {:?}", addr, packet);
-                    }
+                    // if is_new {
+                    //    println!("Peer Discovered: {} -> {:?}", addr, packet);
+                    // }
                 }
                 _ => {
                     // Ignore IPv6

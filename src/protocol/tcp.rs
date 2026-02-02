@@ -24,7 +24,11 @@ impl TcpProtocol {
     pub async fn start_server(&self) -> Result<()> {
         let addr = format!("0.0.0.0:{}", self.port);
         let listener = TcpListener::bind(&addr).await?;
-        println!("[TCP] Listening on {}", addr);
+        // println!("[TCP] Listening on {}", addr);
+        self.run_server(listener).await
+    }
+
+    pub async fn run_server(&self, listener: TcpListener) -> Result<()> {
 
         // Receive metadata first
         let (mut meta_socket, _) = listener.accept().await?;
@@ -49,7 +53,7 @@ impl TcpProtocol {
         // Open the file for writing
         // LEARN: We use OpenOptions to create/overwrite.
         // `set_len` pre-allocates space on disk, which helps reduce fragmentation and ensures we have enough space.
-        let mut out = OpenOptions::new()
+        let out = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
@@ -72,8 +76,8 @@ impl TcpProtocol {
 
             let out_clone = out.clone();
             let done_clone = done.clone();
-            let expected_clone = expected_chunks.clone();
-            let size_clone = file_size.clone();
+            let _expected_clone = expected_chunks.clone();
+            let _size_clone = file_size.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -107,11 +111,15 @@ impl TcpProtocol {
 
                     // VERIFY HASH
                     let calculated_hash = blake3::hash(&chunk_data);
+                    // VERIFY HASH
+                    let calculated_hash = blake3::hash(&chunk_data);
                     if calculated_hash.as_bytes() != &hash_buf {
-                        eprintln!("[TCP] Hash mismatch for chunk {}! Data corrupted.", chunk_id);
-                        // In a real protocol, we would send a specific NACK code here.
-                        // For now, we break/close connection which will trigger retry if implemented.
-                        break;
+                        eprintln!("[TCP] Hash mismatch for chunk {}! Requesting retry (NACK).", chunk_id);
+                        if let Err(e) = socket.write_all(&[0]).await { // 0 = NACK
+                             eprintln!("[TCP] Failed to send NACK for chunk {}: {}", chunk_id, e);
+                             break;
+                        }
+                        continue; // Skip writing to disk, expect sender to resend
                     }
 
                     println!("[TCP] Received chunk {} size {}", chunk_id, chunk_size);
@@ -141,12 +149,12 @@ impl TcpProtocol {
             let current_done = done.load(Ordering::SeqCst);
             let current_expected = expected_chunks.load(Ordering::SeqCst);
             if current_done == current_expected && current_expected > 0 {
-                println!("[TCP] All chunks received ({} / {})", current_done, current_expected);
+                // println!("[TCP] All chunks received ({} / {})", current_done, current_expected);
 
-                println!("[TCP] All chunks received ({} / {})", current_done, current_expected);
+                // println!("[TCP] All chunks received ({} / {})", current_done, current_expected);
 
                 // NOTE: Global file integrity check is removed in favor of per-chunk BLAKE3 verification.
-                println!("[TCP] File received successfully.");
+                // println!("[TCP] File received successfully.");
                 
                 break;
             }

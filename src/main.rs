@@ -2,11 +2,10 @@ mod cli;
 mod discovery;
 mod protocol;
 mod transfer;
+mod ui; // Add UI module
 use std::{
     collections::HashMap,
-    io::Write,
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
 use clap::Parser;
@@ -21,94 +20,77 @@ fn format_bytes(bytes: u64) -> String {
     }
     format!("{:.2} {}", size, UNITS[unit_index])
 }
-use cli::{Cli, Commands, Protocol};
-use tokio::time::sleep;
+use cli::{Cli, Commands};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Send { file, protocol } => {
-            println!("Announcing presence via multicast");
-            let peers = Arc::new(Mutex::new(HashMap::new()));
-
-            tokio::spawn(async {
-                let _ = discovery::start_broadcast(9001, 9001).await;
-            });
-
-            {
-                let peers_clone = peers.clone();
-                tokio::spawn(async move {
-                    let _ = discovery::start_listener(peers_clone).await;
-                });
+    // Check if args are provided, else launch Full TUI
+    if std::env::args().len() > 1 {
+        // CLI Mode (legacy support)
+        let cli = Cli::parse();
+        match cli.command {
+            Commands::Send { file: _, protocol: _ } => {
+                // ... (Existing CLI logic could go here, but user wants TUI primarily)
+                // For now, let's redirect to TUI or keep legacy for scripts?
+                // User said "no like make it a tui entirely".
+                // Let's ignore args for now and force TUI provided in standard run
+                // converting args to initial state if needed.
+                // But for simplicity, let's just launch the TUI.
             }
-            println!("Discovering peers for 3 secs");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-            let list = discovery::get_peers(&peers);
-
-            if list.is_empty() {
-                println!("No peers found");
-                std::process::exit(1);
-            }
-            println!("Select a device to send to:\n ");
-            for (i, p) in list.iter().enumerate() {
-                println!("[{}] {} ({})", i, p.packet.hostname, p.addr.ip());
-            }
-
-            println!("Enter choice:");
-            std::io::stdout().flush().unwrap();
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).unwrap();
-            let idx: usize = input.trim().parse().unwrap();
-
-            let chosen = &list[idx];
-            let addr = format!("{}:{}", chosen.addr.ip(), chosen.packet.tcp_port);
-            println!("Sending to {} ({})", chosen.packet.hostname, addr);
-
-            match protocol {
-                Protocol::Tcp => {
-                    let start = Instant::now();
-                    let sender = protocol::tcp_send::TcpSender::new(addr, file.clone());
-                    let bytes_sent = sender.parallel_send().await?;
-                    let time_taken = start.elapsed().as_secs_f64();
-                    println!("Sent {} in {:.2} sec", format_bytes(bytes_sent), time_taken);
-                }
-                Protocol::Quic => {
-                    println!("Sending via QUIC...");
-                    let start = Instant::now();
-                    match protocol::quic::QuicProtocol::send_file(addr, file.clone()).await {
-                        Ok(bytes) => {
-                            let time = start.elapsed().as_secs_f64();
-                            println!("Sent {} in {:.2}s via QUIC", format_bytes(bytes), time);
-                        }
-                        Err(e) => eprintln!("QUIC Send Error: {}", e),
-                    }
-                }
-            }
-            loop {
-                sleep(std::time::Duration::from_secs(60)).await;
+            Commands::Receive { protocol: _ } => {}
+        }
+    }
+    
+    // Auto-launch TUI
+    // 1. Setup Shared State
+    let peers = Arc::new(Mutex::new(HashMap::new()));
+    
+    // 3. Start Transfer Listeners (Background) with Dynamic Ports
+    let (tcp_listener, tcp_port) = {
+        let mut port = 9001;
+        let mut listener = None;
+        for p in 9001..9020 {
+            if let Ok(l) = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", p)).await {
+                listener = Some(l);
+                port = p;
+                break;
             }
         }
-        Commands::Receive { protocol } => match protocol {
-            Protocol::Tcp => {
-                // Announce presence
-                tokio::spawn(async {
-                    let _ = discovery::start_broadcast(9001, 9003).await; // Advertise TCP 9001, QUIC 9003
-                });
+        (listener.expect("No free ports 9001-9020"), port)
+    };
+    
+    // Send updated port to UI/State?
+    // Ideally we'd display "Listening on :900X" in the UI.
 
-                let server = protocol::tcp::TcpProtocol::new(9001);
-                server.start_server().await
-            }
-            Protocol::Quic => {
-                tokio::spawn(async {
-                    let _ = discovery::start_broadcast(9001, 9003).await;
-                });
-                println!("Starting QUIC server on 9003...");
-                protocol::quic::QuicProtocol::start_server(9003).await
-            }
-        },
-    }
+    tokio::spawn(async move {
+        let server = protocol::tcp::TcpProtocol::new(tcp_port);
+        if let Err(_e) = server.run_server(tcp_listener).await {
+            // eprintln!("TCP Server Error: {}", e);
+        }
+    });
+
+    // QUIC Receiver (Try to match TCP port or +2)
+    // For simplicity, let's try to bind QUIC to the SAME port (UDP)
+    let quic_port = tcp_port;
+    tokio::spawn(async move {
+        if let Err(_e) = protocol::quic::QuicProtocol::start_server(quic_port).await {
+             // eprintln!("QUIC Server Error: {}", e);
+        }
+    });
+
+    // 4. Start Discovery with ACTUAL port
+    tokio::spawn(async move {
+        let _ = discovery::start_broadcast(tcp_port, quic_port).await;
+    });
+    
+    let peers_clone = peers.clone();
+    tokio::spawn(async move {
+        let _ = discovery::start_listener(peers_clone).await;
+    });
+
+    // 5. Run TUI
+    let _chosen_peer_opt = ui::run_tui(peers).await?;
+    
+    Ok(())
 }
 
